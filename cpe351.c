@@ -1,8 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
-// Structure for a process
+// Process structure - using linked list (NO arrays)
 struct Process {
     int id;
     int burst;
@@ -10,380 +11,631 @@ struct Process {
     int priority;
     int waiting;
     int remaining;
+    int completed;
+    int original_burst;
+    int original_priority;
     struct Process* next;
 };
 
-struct Process* create_process(int id, int burst, int arrival, int priority) {
-    struct Process* p = (struct Process*)malloc(sizeof(struct Process));
-    p->id = id;
-    p->burst = burst;
-    p->arrival = arrival;
-    p->priority = priority;
-    p->waiting = 0;
-    p->remaining = burst;
+// Queue structure using linked list (NO arrays)
+struct Queue {
+    struct Process* head;
+    struct Process* tail;
+    int size;
+};
+
+// Initialize queue
+void init_queue(struct Queue* q) {
+    q->head = NULL;
+    q->tail = NULL;
+    q->size = 0;
+}
+
+// Enqueue to end of queue
+void enqueue(struct Queue* q, struct Process* p) {
+    if (!p) return;
+    p->next = NULL;
+    if (!q->head) {
+        q->head = p;
+        q->tail = p;
+    } else {
+        q->tail->next = p;
+        q->tail = p;
+    }
+    q->size++;
+}
+
+// Dequeue from front of queue
+struct Process* dequeue(struct Queue* q) {
+    if (!q->head) return NULL;
+    struct Process* p = q->head;
+    q->head = q->head->next;
+    if (!q->head) q->tail = NULL;
+    q->size--;
     p->next = NULL;
     return p;
 }
 
-// ALGORITHM 1: FCFS
-void fcfs(struct Process* head, int n, FILE* out) {
-    int* wt = (int*)malloc(n * sizeof(int));
-    int time = 0, total = 0;
-    struct Process* curr = head;
-    
-    while (curr) {
-        if (time < curr->arrival) time = curr->arrival;
-        wt[curr->id] = time - curr->arrival;
-        total += wt[curr->id];
-        time += curr->burst;
-        curr = curr->next;
-    }
-    
-    fprintf(out, "1");
-    for (int i = 0; i < n; i++) fprintf(out, " %d", wt[i]);
-    fprintf(out, " %.2f\n", (float)total/n);
-    free(wt);
+// Check if queue is empty
+int is_empty(struct Queue* q) {
+    return q->head == NULL;
 }
 
-// ALGORITHM 2: SJF Non-Preemptive
-void sjf_nonpre(struct Process* head, int n, FILE* out) {
-    int* wt = (int*)malloc(n * sizeof(int));
-    for (int i = 0; i < n; i++) wt[i] = 0;
-    
-    struct Process* list = NULL;
-    struct Process* curr = head;
+// Copy a single process
+struct Process* copy_process(struct Process* src) {
+    struct Process* p = (struct Process*)malloc(sizeof(struct Process));
+    p->id = src->id;
+    p->burst = src->burst;
+    p->arrival = src->arrival;
+    p->priority = src->priority;
+    p->waiting = src->waiting;
+    p->remaining = src->remaining;
+    p->completed = src->completed;
+    p->original_burst = src->original_burst;
+    p->original_priority = src->original_priority;
+    p->next = NULL;
+    return p;
+}
+
+// Copy entire queue
+struct Queue* copy_queue(struct Queue* src) {
+    struct Queue* dest = (struct Queue*)malloc(sizeof(struct Queue));
+    init_queue(dest);
+    struct Process* curr = src->head;
     while (curr) {
-        struct Process* copy = create_process(curr->id, curr->burst, curr->arrival, curr->priority);
-        copy->next = list;
-        list = copy;
+        enqueue(dest, copy_process(curr));
+        curr = curr->next;
+    }
+    return dest;
+}
+
+// Read processes from file
+struct Queue* read_processes(const char* filename) {
+    FILE* file = fopen(filename, "r");
+    if (!file) return NULL;
+    
+    struct Queue* queue = (struct Queue*)malloc(sizeof(struct Queue));
+    init_queue(queue);
+    
+    char line[256];
+    int id = 0;
+    
+    while (fgets(line, sizeof(line), file)) {
+        if (line[0] == '\n' || line[0] == '\0') continue;
+        
+        struct Process* p = (struct Process*)malloc(sizeof(struct Process));
+        p->id = id++;
+        p->next = NULL;
+        
+        sscanf(line, "%d:%d:%d", &p->burst, &p->arrival, &p->priority);
+        p->original_burst = p->burst;
+        p->original_priority = p->priority;
+        p->remaining = p->burst;
+        p->waiting = 0;
+        p->completed = 0;
+        
+        enqueue(queue, p);
+    }
+    
+    fclose(file);
+    return queue;
+}
+
+// Function to insert waiting time in order by ID (NO arrays!)
+void insert_ordered(struct Queue* ordered, int id, int waiting) {
+    struct Process* newp = (struct Process*)malloc(sizeof(struct Process));
+    newp->id = id;
+    newp->waiting = waiting;
+    newp->next = NULL;
+    
+    if (is_empty(ordered) || ordered->head->id > id) {
+        newp->next = ordered->head;
+        ordered->head = newp;
+        if (!ordered->tail) ordered->tail = newp;
+        if (ordered->tail == ordered->head) ordered->tail = newp;
+        ordered->size++;
+        return;
+    }
+    
+    struct Process* curr = ordered->head;
+    while (curr->next && curr->next->id < id) {
+        curr = curr->next;
+    }
+    newp->next = curr->next;
+    curr->next = newp;
+    if (!newp->next) ordered->tail = newp;
+    ordered->size++;
+}
+
+// ALGORITHM 1: FCFS
+void fcfs(struct Queue* processes, FILE* out) {
+    struct Queue* result = (struct Queue*)malloc(sizeof(struct Queue));
+    init_queue(result);
+    
+    struct Queue* copy = copy_queue(processes);
+    
+    int current_time = 0;
+    int total_waiting = 0;
+    int n = processes->size;
+    int completed = 0;
+    
+    fprintf(out, "1");
+    printf("1");
+    
+    while (completed < n) {
+        struct Process* selected = NULL;
+        struct Process* prev = NULL;
+        struct Process* selected_prev = NULL;
+        struct Process* curr = copy->head;
+        prev = NULL;
+        
+        while (curr) {
+            if (curr->arrival <= current_time && !curr->completed) {
+                if (!selected || curr->arrival < selected->arrival) {
+                    selected = curr;
+                    selected_prev = prev;
+                }
+            }
+            prev = curr;
+            curr = curr->next;
+        }
+        
+        if (!selected) {
+            current_time++;
+            continue;
+        }
+        
+        if (selected_prev) selected_prev->next = selected->next;
+        else copy->head = selected->next;
+        if (copy->tail == selected) copy->tail = selected_prev;
+        
+        selected->waiting = current_time - selected->arrival;
+        if (selected->waiting < 0) selected->waiting = 0;
+        total_waiting += selected->waiting;
+        
+        current_time += selected->burst;
+        selected->completed = 1;
+        completed++;
+        
+        insert_ordered(result, selected->id, selected->waiting);
+    }
+    
+    // Print waiting times in order
+    struct Process* curr = result->head;
+    while (curr) {
+        fprintf(out, ":%d", curr->waiting);
+        printf(":%d", curr->waiting);
         curr = curr->next;
     }
     
-    int time = 0, completed = 0, total = 0;
+    float awt = (float)total_waiting / n;
+    fprintf(out, ":%.2f\n", awt);
+    printf(":%.2f\n", awt);
+    
+    while (!is_empty(copy)) free(dequeue(copy));
+    while (!is_empty(result)) free(dequeue(result));
+    free(copy);
+    free(result);
+}
+
+// ALGORITHM 2: SJF Non-preemptive
+void sjf_nonpreemptive(struct Queue* processes, FILE* out) {
+    struct Queue* result = (struct Queue*)malloc(sizeof(struct Queue));
+    init_queue(result);
+    
+    struct Queue* copy = copy_queue(processes);
+    
+    int current_time = 0;
+    int total_waiting = 0;
+    int n = processes->size;
+    int completed = 0;
+    
+    fprintf(out, "2");
+    printf("2");
     
     while (completed < n) {
         struct Process* shortest = NULL;
         struct Process* prev = NULL;
-        struct Process* sprev = NULL;
-        curr = list;
-        struct Process* pprev = NULL;
+        struct Process* shortest_prev = NULL;
+        struct Process* curr = copy->head;
+        prev = NULL;
         
         while (curr) {
-            if (curr->arrival <= time && curr->burst > 0) {
+            if (curr->arrival <= current_time && !curr->completed) {
                 if (!shortest || curr->burst < shortest->burst) {
                     shortest = curr;
-                    sprev = pprev;
+                    shortest_prev = prev;
                 }
             }
-            pprev = curr;
+            prev = curr;
             curr = curr->next;
         }
         
-        if (!shortest) { time++; continue; }
+        if (!shortest) {
+            current_time++;
+            continue;
+        }
         
-        if (sprev) sprev->next = shortest->next;
-        else list = shortest->next;
+        if (shortest_prev) shortest_prev->next = shortest->next;
+        else copy->head = shortest->next;
+        if (copy->tail == shortest) copy->tail = shortest_prev;
         
-        wt[shortest->id] = time - shortest->arrival;
-        total += wt[shortest->id];
-        time += shortest->burst;
+        shortest->waiting = current_time - shortest->arrival;
+        if (shortest->waiting < 0) shortest->waiting = 0;
+        total_waiting += shortest->waiting;
+        
+        current_time += shortest->burst;
+        shortest->completed = 1;
         completed++;
-        free(shortest);
+        
+        insert_ordered(result, shortest->id, shortest->waiting);
     }
     
-    fprintf(out, "2");
-    for (int i = 0; i < n; i++) fprintf(out, " %d", wt[i]);
-    fprintf(out, " %.2f\n", (float)total/n);
-    free(wt);
+    struct Process* curr = result->head;
+    while (curr) {
+        fprintf(out, ":%d", curr->waiting);
+        printf(":%d", curr->waiting);
+        curr = curr->next;
+    }
+    
+    float awt = (float)total_waiting / n;
+    fprintf(out, ":%.2f\n", awt);
+    printf(":%.2f\n", awt);
+    
+    while (!is_empty(copy)) free(dequeue(copy));
+    while (!is_empty(result)) free(dequeue(result));
+    free(copy);
+    free(result);
 }
 
 // ALGORITHM 3: SJF Preemptive (SRTF)
-void sjf_pre(struct Process* head, int n, FILE* out) {
-    struct Process* copies[10];
-    struct Process* curr = head;
-    for (int i = 0; i < n; i++) {
-        copies[i] = create_process(curr->id, curr->burst, curr->arrival, curr->priority);
-        copies[i]->remaining = curr->burst;
-        curr = curr->next;
-    }
+void sjf_preemptive(struct Queue* processes, FILE* out) {
+    struct Queue* copy = copy_queue(processes);
+    struct Queue* result = (struct Queue*)malloc(sizeof(struct Queue));
+    init_queue(result);
     
-    int* wt = (int*)malloc(n * sizeof(int));
-    for (int i = 0; i < n; i++) wt[i] = 0;
-    
-    int time = 0, completed = 0, total = 0;
-    
-    while (completed < n) {
-        int idx = -1, min_rem = 999999;
-        for (int i = 0; i < n; i++) {
-            if (copies[i]->arrival <= time && copies[i]->remaining > 0) {
-                if (copies[i]->remaining < min_rem) {
-                    min_rem = copies[i]->remaining;
-                    idx = i;
-                }
-            }
-        }
-        
-        if (idx == -1) { time++; continue; }
-        
-        copies[idx]->remaining--;
-        time++;
-        
-        for (int i = 0; i < n; i++) {
-            if (i != idx && copies[i]->arrival <= time && copies[i]->remaining > 0) {
-                wt[i]++;
-                total++;
-            }
-        }
-        
-        if (copies[idx]->remaining == 0) {
-            wt[idx] = time - copies[idx]->arrival - copies[idx]->burst;
-            completed++;
-        }
-    }
+    int current_time = 0;
+    int completed = 0;
+    int total_waiting = 0;
+    int n = processes->size;
     
     fprintf(out, "3");
-    for (int i = 0; i < n; i++) fprintf(out, " %d", wt[i]);
-    fprintf(out, " %.2f\n", (float)total/n);
-    free(wt);
-    for (int i = 0; i < n; i++) free(copies[i]);
-}
-
-// ALGORITHM 4: Priority Non-Preemptive
-void priority_nonpre(struct Process* head, int n, FILE* out) {
-    int* wt = (int*)malloc(n * sizeof(int));
-    for (int i = 0; i < n; i++) wt[i] = 0;
+    printf("3");
     
-    struct Process* list = NULL;
-    struct Process* curr = head;
+    while (completed < n) {
+        struct Process* shortest = NULL;
+        struct Process* curr = copy->head;
+        
+        while (curr) {
+            if (curr->arrival <= current_time && !curr->completed && curr->remaining > 0) {
+                if (!shortest || curr->remaining < shortest->remaining) {
+                    shortest = curr;
+                }
+            }
+            curr = curr->next;
+        }
+        
+        if (!shortest) {
+            current_time++;
+            continue;
+        }
+        
+        if (shortest->remaining == shortest->burst) {
+            shortest->waiting = current_time - shortest->arrival;
+            if (shortest->waiting < 0) shortest->waiting = 0;
+        }
+        
+        shortest->remaining--;
+        current_time++;
+        
+        if (shortest->remaining == 0) {
+            shortest->completed = 1;
+            completed++;
+            total_waiting += shortest->waiting;
+            insert_ordered(result, shortest->id, shortest->waiting);
+        }
+    }
+    
+    struct Process* curr = result->head;
     while (curr) {
-        struct Process* copy = create_process(curr->id, curr->burst, curr->arrival, curr->priority);
-        copy->next = list;
-        list = copy;
+        fprintf(out, ":%d", curr->waiting);
+        printf(":%d", curr->waiting);
         curr = curr->next;
     }
     
-    int time = 0, completed = 0, total = 0;
+    float awt = (float)total_waiting / n;
+    fprintf(out, ":%.2f\n", awt);
+    printf(":%.2f\n", awt);
+    
+    while (!is_empty(copy)) free(dequeue(copy));
+    while (!is_empty(result)) free(dequeue(result));
+    free(copy);
+    free(result);
+}
+
+// ALGORITHM 4: Priority Non-preemptive
+void priority_nonpreemptive(struct Queue* processes, FILE* out) {
+    struct Queue* result = (struct Queue*)malloc(sizeof(struct Queue));
+    init_queue(result);
+    
+    struct Queue* copy = copy_queue(processes);
+    
+    int current_time = 0;
+    int total_waiting = 0;
+    int n = processes->size;
+    int completed = 0;
+    
+    fprintf(out, "4");
+    printf("4");
     
     while (completed < n) {
         struct Process* highest = NULL;
         struct Process* prev = NULL;
-        struct Process* hprev = NULL;
-        curr = list;
-        struct Process* pprev = NULL;
+        struct Process* highest_prev = NULL;
+        struct Process* curr = copy->head;
+        prev = NULL;
         
         while (curr) {
-            if (curr->arrival <= time && curr->burst > 0) {
+            if (curr->arrival <= current_time && !curr->completed) {
                 if (!highest || curr->priority < highest->priority) {
                     highest = curr;
-                    hprev = pprev;
+                    highest_prev = prev;
                 }
             }
-            pprev = curr;
+            prev = curr;
             curr = curr->next;
         }
         
-        if (!highest) { time++; continue; }
+        if (!highest) {
+            current_time++;
+            continue;
+        }
         
-        if (hprev) hprev->next = highest->next;
-        else list = highest->next;
+        if (highest_prev) highest_prev->next = highest->next;
+        else copy->head = highest->next;
+        if (copy->tail == highest) copy->tail = highest_prev;
         
-        wt[highest->id] = time - highest->arrival;
-        total += wt[highest->id];
-        time += highest->burst;
+        highest->waiting = current_time - highest->arrival;
+        if (highest->waiting < 0) highest->waiting = 0;
+        total_waiting += highest->waiting;
+        
+        current_time += highest->burst;
+        highest->completed = 1;
         completed++;
-        free(highest);
+        
+        insert_ordered(result, highest->id, highest->waiting);
     }
     
-    fprintf(out, "4");
-    for (int i = 0; i < n; i++) fprintf(out, " %d", wt[i]);
-    fprintf(out, " %.2f\n", (float)total/n);
-    free(wt);
+    struct Process* curr = result->head;
+    while (curr) {
+        fprintf(out, ":%d", curr->waiting);
+        printf(":%d", curr->waiting);
+        curr = curr->next;
+    }
+    
+    float awt = (float)total_waiting / n;
+    fprintf(out, ":%.2f\n", awt);
+    printf(":%.2f\n", awt);
+    
+    while (!is_empty(copy)) free(dequeue(copy));
+    while (!is_empty(result)) free(dequeue(result));
+    free(copy);
+    free(result);
 }
 
 // ALGORITHM 5: Priority Preemptive
-void priority_pre(struct Process* head, int n, FILE* out) {
-    struct Process* copies[10];
-    struct Process* curr = head;
-    for (int i = 0; i < n; i++) {
-        copies[i] = create_process(curr->id, curr->burst, curr->arrival, curr->priority);
-        copies[i]->remaining = curr->burst;
+void priority_preemptive(struct Queue* processes, FILE* out) {
+    struct Queue* copy = copy_queue(processes);
+    struct Queue* result = (struct Queue*)malloc(sizeof(struct Queue));
+    init_queue(result);
+    
+    int current_time = 0;
+    int completed = 0;
+    int total_waiting = 0;
+    int n = processes->size;
+    
+    fprintf(out, "5");
+    printf("5");
+    
+    while (completed < n) {
+        struct Process* highest = NULL;
+        struct Process* curr = copy->head;
+        
+        while (curr) {
+            if (curr->arrival <= current_time && !curr->completed && curr->remaining > 0) {
+                if (!highest || curr->priority < highest->priority) {
+                    highest = curr;
+                }
+            }
+            curr = curr->next;
+        }
+        
+        if (!highest) {
+            current_time++;
+            continue;
+        }
+        
+        if (highest->remaining == highest->burst) {
+            highest->waiting = current_time - highest->arrival;
+            if (highest->waiting < 0) highest->waiting = 0;
+        }
+        
+        highest->remaining--;
+        current_time++;
+        
+        if (highest->remaining == 0) {
+            highest->completed = 1;
+            completed++;
+            total_waiting += highest->waiting;
+            insert_ordered(result, highest->id, highest->waiting);
+        }
+    }
+    
+    struct Process* curr = result->head;
+    while (curr) {
+        fprintf(out, ":%d", curr->waiting);
+        printf(":%d", curr->waiting);
         curr = curr->next;
     }
     
-    int* wt = (int*)malloc(n * sizeof(int));
-    for (int i = 0; i < n; i++) wt[i] = 0;
+    float awt = (float)total_waiting / n;
+    fprintf(out, ":%.2f\n", awt);
+    printf(":%.2f\n", awt);
     
-    int time = 0, completed = 0, total = 0;
-    
-    while (completed < n) {
-        int idx = -1, high_pri = 999999;
-        for (int i = 0; i < n; i++) {
-            if (copies[i]->arrival <= time && copies[i]->remaining > 0) {
-                if (copies[i]->priority < high_pri) {
-                    high_pri = copies[i]->priority;
-                    idx = i;
-                }
-            }
-        }
-        
-        if (idx == -1) { time++; continue; }
-        
-        copies[idx]->remaining--;
-        time++;
-        
-        for (int i = 0; i < n; i++) {
-            if (i != idx && copies[i]->arrival <= time && copies[i]->remaining > 0) {
-                wt[i]++;
-                total++;
-            }
-        }
-        
-        if (copies[idx]->remaining == 0) {
-            wt[idx] = time - copies[idx]->arrival - copies[idx]->burst;
-            completed++;
-        }
-    }
-    
-    fprintf(out, "5");
-    for (int i = 0; i < n; i++) fprintf(out, " %d", wt[i]);
-    fprintf(out, " %.2f\n", (float)total/n);
-    free(wt);
-    for (int i = 0; i < n; i++) free(copies[i]);
+    while (!is_empty(copy)) free(dequeue(copy));
+    while (!is_empty(result)) free(dequeue(result));
+    free(copy);
+    free(result);
 }
 
 // ALGORITHM 6: Round Robin
-void round_robin(struct Process* head, int n, FILE* out, int quantum) {
-    struct Process* copies[10];
-    struct Process* curr = head;
-    for (int i = 0; i < n; i++) {
-        copies[i] = create_process(curr->id, curr->burst, curr->arrival, curr->priority);
-        copies[i]->remaining = curr->burst;
-        curr = curr->next;
-    }
+void round_robin(struct Queue* processes, int quantum, FILE* out) {
+    struct Queue* ready = (struct Queue*)malloc(sizeof(struct Queue));
+    init_queue(ready);
     
-    int* wt = (int*)malloc(n * sizeof(int));
-    for (int i = 0; i < n; i++) wt[i] = 0;
+    struct Queue* copy = copy_queue(processes);
+    struct Queue* result = (struct Queue*)malloc(sizeof(struct Queue));
+    init_queue(result);
     
-    int queue[100], front = 0, rear = 0;
-    int in_queue[10] = {0};
-    int time = 0, completed = 0, total = 0;
-    
-    while (completed < n) {
-        for (int i = 0; i < n; i++) {
-            if (copies[i]->arrival <= time && copies[i]->remaining > 0 && !in_queue[i]) {
-                queue[rear++] = i;
-                in_queue[i] = 1;
-            }
-        }
-        
-        if (front == rear) { time++; continue; }
-        
-        int idx = queue[front++];
-        in_queue[idx] = 0;
-        
-        int run = (copies[idx]->remaining < quantum) ? copies[idx]->remaining : quantum;
-        
-        for (int i = front; i < rear; i++) {
-            wt[queue[i]] += run;
-            total += run;
-        }
-        
-        time += run;
-        copies[idx]->remaining -= run;
-        
-        for (int i = 0; i < n; i++) {
-            if (copies[i]->arrival <= time && copies[i]->remaining > 0 && !in_queue[i]) {
-                queue[rear++] = i;
-                in_queue[i] = 1;
-            }
-        }
-        
-        if (copies[idx]->remaining > 0) {
-            queue[rear++] = idx;
-            in_queue[idx] = 1;
-        } else {
-            wt[idx] = time - copies[idx]->arrival - copies[idx]->burst;
-            completed++;
-        }
-    }
+    int current_time = 0;
+    int total_waiting = 0;
+    int n = processes->size;
     
     fprintf(out, "6");
-    for (int i = 0; i < n; i++) fprintf(out, " %d", wt[i]);
-    fprintf(out, " %.2f\n", (float)total/n);
-    free(wt);
-    for (int i = 0; i < n; i++) free(copies[i]);
-}
-
-int main() {
-    printf("========================================\n");
-    printf("CPU SCHEDULER SIMULATOR\n");
-    printf("========================================\n\n");
+    printf("6");
     
-    // Create processes (simulating input file)
-    struct Process* head = NULL;
-    struct Process* tail = NULL;
-    
-    // Input data: burst:arrival:priority
-    // You can change these numbers
-    int data[][3] = {
-        {10, 0, 0},
-        {5, 0, 0},
-        {8, 1, 1},
-        {4, 2, 2},
-        {3, 3, 1}
-    };
-    int n = 5;
-    
-    for (int i = 0; i < n; i++) {
-        struct Process* p = create_process(i, data[i][0], data[i][1], data[i][2]);
-        if (!head) head = p;
-        else tail->next = p;
-        tail = p;
+    while (result->size < n) {
+        struct Process* curr = copy->head;
+        while (curr) {
+            if (curr->arrival <= current_time && !curr->completed && curr->remaining > 0) {
+                int in_queue = 0;
+                struct Process* r = ready->head;
+                while (r) {
+                    if (r->id == curr->id) { in_queue = 1; break; }
+                    r = r->next;
+                }
+                if (!in_queue) {
+                    enqueue(ready, copy_process(curr));
+                }
+            }
+            curr = curr->next;
+        }
+        
+        if (is_empty(ready)) {
+            current_time++;
+            continue;
+        }
+        
+        struct Process* current = dequeue(ready);
+        
+        if (current->remaining == current->burst) {
+            current->waiting = current_time - current->arrival;
+            if (current->waiting < 0) current->waiting = 0;
+            total_waiting += current->waiting;
+        }
+        
+        int run = (current->remaining < quantum) ? current->remaining : quantum;
+        current_time += run;
+        current->remaining -= run;
+        
+        if (current->remaining > 0) {
+            enqueue(ready, current);
+        } else {
+            current->completed = 1;
+            insert_ordered(result, current->id, current->waiting);
+            free(current);
+        }
     }
     
-    printf("Processes created:\n");
-    struct Process* curr = head;
+    struct Process* curr = result->head;
     while (curr) {
-        printf("P%d: Burst=%d, Arrival=%d, Priority=%d\n", 
-               curr->id, curr->burst, curr->arrival, curr->priority);
+        fprintf(out, ":%d", curr->waiting);
+        printf(":%d", curr->waiting);
         curr = curr->next;
     }
     
-    // Create output
-    char output[5000] = "";
-    FILE* out = fmemopen(output, sizeof(output), "w");
+    float awt = (float)total_waiting / n;
+    fprintf(out, ":%.2f\n", awt);
+    printf(":%.2f\n", awt);
     
-    // Header
-    fprintf(out, "CPU Algorithm");
-    for (int i = 0; i < n; i++) fprintf(out, " WT%d", i+1);
-    fprintf(out, " AWT\n");
+    while (!is_empty(ready)) free(dequeue(ready));
+    while (!is_empty(result)) free(dequeue(result));
+    while (!is_empty(copy)) free(dequeue(copy));
+    free(ready);
+    free(copy);
+    free(result);
+}
+
+// Parse command line arguments
+void parse_args(int argc, char* argv[], int* quantum, char* input_file, char* output_file) {
+    int opt;
+    *quantum = 2;
+    input_file[0] = '\0';
+    output_file[0] = '\0';
     
-    // Run all algorithms
-    fcfs(head, n, out);
-    sjf_nonpre(head, n, out);
-    sjf_pre(head, n, out);
-    priority_nonpre(head, n, out);
-    priority_pre(head, n, out);
-    round_robin(head, n, out, 2);
+    while ((opt = getopt(argc, argv, "t:f:o:")) != -1) {
+        switch(opt) {
+            case 't': *quantum = atoi(optarg); break;
+            case 'f': strcpy(input_file, optarg); break;
+            case 'o': strcpy(output_file, optarg); break;
+        }
+    }
+}
+
+// MAIN FUNCTION
+int main(int argc, char* argv[]) {
+    int quantum;
+    char input_file[256];
+    char output_file[256];
+    
+    parse_args(argc, argv, &quantum, input_file, output_file);
+    
+    if (input_file[0] == '\0' || output_file[0] == '\0') {
+        printf("Usage: %s -t <quantum> -f <input> -o <output>\n", argv[0]);
+        printf("Example: %s -t 2 -f input.txt -o output.txt\n", argv[0]);
+        return 1;
+    }
+    
+    printf("========================================\n");
+    printf("CPU SCHEDULER SIMULATOR\n");
+    printf("========================================\n");
+    printf("Time Quantum: %d\n", quantum);
+    printf("Input File: %s\n", input_file);
+    printf("Output File: %s\n", output_file);
+    printf("=====================A===================\n\n");
+    
+    struct Queue* processes = read_processes(input_file);
+    if (!processes) {
+        printf("ERROR: Cannot read %s\n", input_file);
+        return 1;
+    }
+    
+    printf("Processes loaded: %d\n", processes->size);
+    printf("\n--- RESULTS ---\n");
+    printf("========================================\n");
+    
+    FILE* out = fopen(output_file, "w");
+    if (!out) {
+        printf("ERROR: Cannot create %s\n", output_file);
+        return 1;
+    }
+    
+    // Run all 6 scheduling algorithms
+    fcfs(processes, out);
+    sjf_nonpreemptive(processes, out);
+    sjf_preemptive(processes, out);
+    priority_nonpreemptive(processes, out);
+    priority_preemptive(processes, out);
+    round_robin(processes, quantum, out);
     
     fclose(out);
     
-    printf("\n========================================\n");
-    printf("OUTPUT (Copy this to your output file)\n");
-    printf("========================================\n\n");
-    printf("%s", output);
+    printf("========================================\n");
+    printf("\n✓ Output written to %s\n", output_file);
     
     // Cleanup
-    curr = head;
-    while (curr) {
-        struct Process* temp = curr;
-        curr = curr->next;
-        free(temp);
-    }
-    
-    printf("\n========================================\n");
-    printf("SIMULATION COMPLETE\n");
-    printf("========================================\n");
+    while (!is_empty(processes)) free(dequeue(processes));
+    free(processes);
     
     return 0;
 }
